@@ -1,13 +1,28 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from os import path as osp
 
+import cv2
 import mmcv
+import numpy as np
 import torch
 from mmcv.image import tensor2imgs
 
 from mmdet3d.models import (Base3DDetector, Base3DSegmentor,
                             SingleStageMono3DDetector)
+from . import kitti_util as utils
 
+class PlainObject3d:
+    def __init__(self, x, y, z, l, w, h, ry):
+        self.l = l
+        self.w = w
+        self.h = h
+        self.ry = ry
+        self.t = (x, y, z)
+
+def draw_3d_box(img, plain_obj_3d, calib):
+    box3d_pts_2d, _ = utils.compute_box_3d(plain_obj_3d, calib)
+    img = utils.draw_projected_box3d(img, box3d_pts_2d, color=(0, 255, 0))
+    return img
 
 def single_gpu_test(model,
                     data_loader,
@@ -88,3 +103,34 @@ def single_gpu_test(model,
         for _ in range(batch_size):
             prog_bar.update()
     return results
+
+def single_gpu_inference(model, data, img, frame_deque=None):
+    model.eval()
+    with torch.no_grad():
+        result = model(return_loss=False, rescale=True, **data)
+
+    boxes3d = []
+    for index, value in enumerate(result[0]['img_bbox']['boxes_3d'].tensor):
+        if float(result[0]['img_bbox']['scores_3d'][index]) > 0.3:
+            # import ipdb; ipdb.set_trace()
+            boxes3d.append(value.detach().cpu().numpy().tolist())
+    # raw_boxes3d = result[0]['img_bbox']['boxes_3d'].tensor.cpu().numpy()
+    if len(boxes3d) == 0:
+        resized_img = cv2.resize(img, (1920, 1080), interpolation = cv2.INTER_AREA)
+        frame_deque.appendleft(resized_img)
+    boxes3d = np.array(boxes3d)
+    for idx, box in enumerate(boxes3d):
+        # img = cv2.imread(data['img_metas'][0].data[0][0]['filename'])
+
+        # This might failed.
+        # Nah, It's not failed.
+        calib = np.array(data['img_metas'][0].data[0][0]['cam2img'])[:3]
+        # print(calib)
+        parsed_box = PlainObject3d(box[0], box[1], box[2], box[3], box[4], box[5], box[6])
+        img = draw_3d_box(img, parsed_box, calib)
+
+        if frame_deque is not None:
+            resized_img = cv2.resize(img, (1920, 1080), interpolation = cv2.INTER_AREA)
+            frame_deque.appendleft(resized_img)
+    
+    return img
